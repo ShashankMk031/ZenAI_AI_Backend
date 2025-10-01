@@ -1,8 +1,9 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Optional
 import os
 import json
+import tempfile
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -75,12 +76,25 @@ try:
     print("[INFO] Groq client successfully initialized")
         
 except Exception as e:
-    print(f"Groq initialization failed: {e}")
+    print(f"[ERROR] Groq initialization failed: {e}")
     llm = None
+
+# Initialize Audio Processor
+try:
+    from app.audio_processor import AudioProcessor
+    audio_processor = AudioProcessor()
+    print("[INFO] Audio processor initialized")
+except Exception as e:
+    print(f"[ERROR] Audio processor initialization failed: {e}")
+    audio_processor = None
 
 @app.get("/")
 async def root():
-    return {"message": "AI Project Manager Agent is running!", "groq_status": "connected" if llm else "failed"}
+    return {
+        "message": "AI Project Manager Agent is running!", 
+        "groq_status": "connected" if llm else "failed",
+        "audio_status": "enabled" if audio_processor else "disabled"
+    }
 
 @app.post("/analyze-meeting")
 async def analyze_meeting_text(request: MeetingRequest):
@@ -138,10 +152,8 @@ async def analyze_meeting_text(request: MeetingRequest):
         # Clean the response to handle markdown code blocks
         content = response.content.strip()
         if content.startswith('```json'):
-            # Remove the markdown code block markers
-            content = content[7:-3].strip()  # Remove ```json and trailing ```
+            content = content[7:-3].strip()
         elif content.startswith('```'):
-            # Handle case where language isn't specified
             content = content[3:-3].strip()
             
         # Parse the JSON response
@@ -159,6 +171,104 @@ async def analyze_meeting_text(request: MeetingRequest):
         error_msg = f"Error during meeting analysis: {e}"
         print(f"[ERROR] {error_msg}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+@app.post("/analyze-meeting-audio")
+async def analyze_meeting_audio(audio_file: UploadFile = File(...)):
+    """
+    Upload audio file, transcribe it, and analyze the meeting
+    Supported formats: MP3, MP4, M4A, WAV, WebM
+    """
+    
+    if not llm:
+        raise HTTPException(status_code=500, detail="Groq API not initialized")
+    
+    if not audio_processor:
+        raise HTTPException(status_code=500, detail="Audio processor not initialized")
+    
+    # Validate file format
+    file_extension = os.path.splitext(audio_file.filename)[1].lower()
+    if file_extension not in audio_processor.supported_formats:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Unsupported format. Supported: {', '.join(audio_processor.supported_formats)}"
+        )
+    
+    # Create temporary file
+    temp_file_path = None
+    try:
+        # Save uploaded file temporarily
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
+            temp_file_path = temp_file.name
+            await audio_processor.save_upload_file(audio_file, temp_file_path)
+        
+        print(f"[INFO] Audio file saved: {temp_file_path}")
+        
+        # Transcribe audio
+        transcript = audio_processor.transcribe_audio(temp_file_path)
+        
+        print(f"[INFO] Transcript: {transcript[:200]}...")
+        
+        # Analyze the transcript using existing logic
+        prompt = f"""
+        You are an AI Project Manager. Analyze this meeting transcript and extract:
+        
+        1. Key decisions made
+        2. Action items (with assignee if mentioned, priority, due date if mentioned)
+        3. Risks and blockers identified
+        4. Brief meeting summary
+        
+        Meeting transcript:
+        {transcript}
+        
+        Format your response as JSON with this structure:
+        {{
+            "key_decisions": ["decision 1", "decision 2"],
+            "action_items": [
+                {{
+                    "title": "task title",
+                    "description": "detailed description",
+                    "assignee": "person name or null",
+                    "priority": "High/Medium/Low",
+                    "due_date": "date if mentioned or null"
+                }}
+            ],
+            "risks_and_blockers": ["risk 1", "risk 2"],
+            "meeting_summary": "brief summary of the meeting"
+        }}
+        
+        Only return valid JSON, no additional text.
+        """
+        
+        # Call Groq API
+        message = HumanMessage(content=prompt)
+        response = llm([message])
+        
+        # Clean and parse response
+        content = response.content.strip()
+        if content.startswith('```json'):
+            content = content[7:-3].strip()
+        elif content.startswith('```'):
+            content = content[3:-3].strip()
+        
+        analysis = json.loads(content)
+        
+        # Add transcript to response
+        analysis['transcript'] = transcript
+        
+        return analysis
+    
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] JSON parsing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+    
+    except Exception as e:
+        print(f"[ERROR] Audio analysis failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+    
+    finally:
+        # Cleanup temporary file
+        if temp_file_path:
+            audio_processor.cleanup_file(temp_file_path)
 
 if __name__ == "__main__":
     import uvicorn
