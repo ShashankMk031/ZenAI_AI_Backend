@@ -4,7 +4,9 @@ from typing import List, Optional
 import os
 import json
 import tempfile
-from dotenv import load_dotenv
+from dotenv import load_dotenv 
+from app.integrations.notion_integration import NotionIntegration
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -88,12 +90,21 @@ except Exception as e:
     print(f"[ERROR] Audio processor initialization failed: {e}")
     audio_processor = None
 
+# Initialize Notion Integration
+try:
+    notion_integration = NotionIntegration()
+    print("[INFO] Notion integration initialized")
+except Exception as e:
+    print(f"[ERROR] Notion integration initialization failed: {e}")
+    notion_integration = None
+
 @app.get("/")
 async def root():
     return {
         "message": "AI Project Manager Agent is running!", 
         "groq_status": "connected" if llm else "failed",
-        "audio_status": "enabled" if audio_processor else "disabled"
+        "audio_status": "enabled" if audio_processor else "disabled",
+        "notion_status": "connected" if notion_integration else "disabled"
     }
 
 @app.post("/analyze-meeting")
@@ -270,6 +281,95 @@ async def analyze_meeting_audio(audio_file: UploadFile = File(...)):
         if temp_file_path:
             audio_processor.cleanup_file(temp_file_path)
 
+@app.post("/analyze-and-sync")
+async def analyze_and_sync_to_notion(request: MeetingRequest):
+    """
+    Analyze meeting text AND automatically create tasks in Notion
+    """
+    
+    if not llm:
+        raise HTTPException(status_code=500, detail="Groq API not initialized")
+    
+    if not notion_integration:
+        raise HTTPException(status_code=500, detail="Notion integration not available")
+    
+    meeting_text = request.meeting_text
+    
+    if not meeting_text.strip():
+        raise HTTPException(status_code=400, detail="meeting_text cannot be empty")
+    
+    # First, analyze the meeting (reuse existing logic)
+    prompt = f"""
+    You are an AI Project Manager. Analyze this meeting transcript and extract:
+    
+    1. Key decisions made
+    2. Action items (with assignee if mentioned, priority, due date if mentioned)
+    3. Risks and blockers identified
+    4. Brief meeting summary
+    
+    Meeting transcript:
+    {meeting_text}
+    
+    Format your response as JSON with this structure:
+    {{
+        "key_decisions": ["decision 1", "decision 2"],
+        "action_items": [
+            {{
+                "title": "task title",
+                "description": "detailed description",
+                "assignee": "person name or null",
+                "priority": "High/Medium/Low",
+                "due_date": "date if mentioned or null"
+            }}
+        ],
+        "risks_and_blockers": ["risk 1", "risk 2"],
+        "meeting_summary": "brief summary of the meeting"
+    }}
+    
+    Only return valid JSON, no additional text.
+    """
+    
+    try:
+        print(f"[INFO] Analyzing meeting and syncing to Notion...")
+        
+        # Call Groq API
+        message = HumanMessage(content=prompt)
+        response = llm([message])
+        
+        # Clean and parse response
+        content = response.content.strip()
+        if content.startswith('```json'):
+            content = content[7:-3].strip()
+        elif content.startswith('```'):
+            content = content[3:-3].strip()
+        
+        analysis = json.loads(content)
+        
+        # Create tasks in Notion
+        notion_results = notion_integration.create_tasks_from_meeting(
+            action_items=analysis.get("action_items", []),
+            meeting_summary=analysis.get("meeting_summary", "Meeting"),
+            meeting_date=datetime.now().strftime("%Y-%m-%d")
+        )
+        
+        # Add Notion sync results to response
+        analysis["notion_sync"] = {
+            "total_tasks": len(notion_results),
+            "successful": sum(1 for r in notion_results if r.get("success")),
+            "failed": sum(1 for r in notion_results if not r.get("success")),
+            "tasks": notion_results
+        }
+        
+        return analysis
+    
+    except json.JSONDecodeError as e:
+        print(f"[ERROR] JSON parsing error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse AI response: {str(e)}")
+    
+    except Exception as e:
+        print(f"[ERROR] Analysis/sync failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Operation failed: {str(e)}")
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
