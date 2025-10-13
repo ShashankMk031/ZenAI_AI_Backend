@@ -1,15 +1,16 @@
+from dotenv import load_dotenv 
+import os 
+
+# Load environment variables
+load_dotenv() 
+
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from typing import List, Optional
-import os
 import json
 import tempfile
-from dotenv import load_dotenv 
 from app.integrations.notion_integration import NotionIntegration
 from datetime import datetime
-
-# Load environment variables
-load_dotenv()
 
 app = FastAPI(title="AI Project Manager Agent", version="1.0.0")
 
@@ -105,7 +106,28 @@ async def root():
         "groq_status": "connected" if llm else "failed",
         "audio_status": "enabled" if audio_processor else "disabled",
         "notion_status": "connected" if notion_integration else "disabled"
-    }
+    } 
+@app.get("/test-notion") 
+async def test_notion():
+    # Test notion connection directly 
+    if not notion_integration:
+        return {"error" : "Notion not initialized"} 
+    
+    try : 
+        # Trying to query the database 
+        response = notion_integration.client.databases.retrieve(
+            database_id = notion_integration.database_id 
+        ) 
+        return { 
+            "success" : True, 
+            "database_title " : response.get("title", [{}])[0].get("plain_text", "Unknown" ), 
+            "database_id " : notion_integration.database_id 
+            } 
+    except Exception as e : 
+        return { 
+            "success" : False, 
+            "error" : str(e) 
+        }
 
 @app.post("/analyze-meeting")
 async def analyze_meeting_text(request: MeetingRequest):
