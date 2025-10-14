@@ -4,6 +4,8 @@ from typing import List, Dict, Optional
 from datetime import datetime
 from dotenv import load_dotenv
 
+# Parse use 
+from app.utils.date_parser import parse_relative_date
 class NotionIntegration:
     def __init__(self):
         # Load environment variables
@@ -178,12 +180,16 @@ class NotionIntegration:
             meeting_date = datetime.now().strftime("%Y-%m-%d")
         
         for item in action_items:
+            # Parse the due date if it exists 
+            raw_due_date = item.get("due_date") 
+            parsed_due_date = parse_relative_date(raw_due_date) if raw_due_date else None 
+             
             result = self.create_task(
                 title=item.get("title", "Untitled Task"),
                 description=item.get("description", ""),
                 assignee=item.get("assignee"),
                 priority=item.get("priority", "Medium"),
-                due_date=item.get("due_date"),
+                due_date= parsed_due_date ,
                 meeting_date=meeting_date,
                 source=f"Meeting: {meeting_summary[:50]}..." if meeting_summary else "AI Meeting Analysis"
             )
