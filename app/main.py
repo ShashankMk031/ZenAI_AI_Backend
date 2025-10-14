@@ -392,6 +392,240 @@ async def analyze_and_sync_to_notion(request: MeetingRequest):
         print(f"[ERROR] Analysis/sync failed: {e}")
         raise HTTPException(status_code=500, detail=f"Operation failed: {str(e)}")
 
+import requests
+
+@app.get("/dashboard")
+async def get_dashboard():
+    """Get project overview dashboard with task metrics"""
+    
+    if not notion_integration:
+        raise HTTPException(status_code=500, detail="Notion not available")
+    
+    try:
+        # Query all tasks from Notion
+        url = f"https://api.notion.com/v1/databases/{notion_integration.database_id}/query"
+        response = requests.post(url, headers=notion_integration.headers, json={})
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to query Notion")
+        
+        data = response.json()
+        tasks = data.get("results", [])
+        
+        # Calculate metrics
+        total_tasks = len(tasks)
+        completed = sum(1 for t in tasks if t.get("properties", {}).get("Status", {}).get("select", {}).get("name") == "Done")
+        in_progress = sum(1 for t in tasks if t.get("properties", {}).get("Status", {}).get("select", {}).get("name") == "In Progress")
+        todo = sum(1 for t in tasks if t.get("properties", {}).get("Status", {}).get("select", {}).get("name") == "To Do")
+        
+        # Get today's date for overdue calculation
+        from datetime import datetime, date
+        today = date.today()
+        
+        # Extract task details
+        task_list = []
+        overdue_count = 0
+        
+        for t in tasks:
+            props = t.get("properties", {})
+            
+            # Get task name
+            title = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "Untitled")
+            
+            # Get status
+            status = props.get("Status", {}).get("select", {}).get("name", "Unknown")
+            
+            # Get priority
+            priority = props.get("Priority", {}).get("select", {}).get("name", "Unknown")
+            
+            # Get assignee
+            assignee_data = props.get("Assignee", {}).get("rich_text", [])
+            assignee = assignee_data[0].get("plain_text", "Unassigned") if assignee_data else "Unassigned"
+            
+            # Get due date
+            due_date_obj = props.get("Due Date", {}).get("date")
+            due_date = due_date_obj.get("start") if due_date_obj else None
+            
+            # Check if overdue
+            is_overdue = False
+            if due_date and status != "Done":
+                try:
+                    due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                    if due < today:
+                        is_overdue = True
+                        overdue_count += 1
+                except:
+                    pass
+            
+            task_list.append({
+                "title": title,
+                "status": status,
+                "priority": priority,
+                "assignee": assignee,
+                "due_date": due_date,
+                "is_overdue": is_overdue,
+                "url": t.get("url")
+            })
+        
+        return {
+            "summary": {
+                "total_tasks": total_tasks,
+                "completed": completed,
+                "in_progress": in_progress,
+                "todo": todo,
+                "overdue": overdue_count,
+                "completion_rate": f"{(completed/total_tasks*100):.1f}%" if total_tasks > 0 else "0%"
+            },
+            "tasks": task_list
+        }
+    
+    except Exception as e:
+        print(f"[ERROR] Dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=f"Dashboard error: {str(e)}")
+
+
+@app.get("/tasks/overdue")
+async def get_overdue_tasks():
+    """Get list of overdue tasks"""
+    
+    if not notion_integration:
+        raise HTTPException(status_code=500, detail="Notion not available")
+    
+    try:
+        # Query all tasks
+        url = f"https://api.notion.com/v1/databases/{notion_integration.database_id}/query"
+        response = requests.post(url, headers=notion_integration.headers, json={})
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to query Notion")
+        
+        data = response.json()
+        tasks = data.get("results", [])
+        
+        from datetime import datetime, date
+        today = date.today()
+        
+        overdue_tasks = []
+        
+        for t in tasks:
+            props = t.get("properties", {})
+            status = props.get("Status", {}).get("select", {}).get("name", "Unknown")
+            
+            # Skip completed tasks
+            if status == "Done":
+                continue
+            
+            # Get due date
+            due_date_obj = props.get("Due Date", {}).get("date")
+            due_date = due_date_obj.get("start") if due_date_obj else None
+            
+            if due_date:
+                try:
+                    due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                    if due < today:
+                        # Task is overdue
+                        days_overdue = (today - due).days
+                        
+                        title = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "Untitled")
+                        assignee_data = props.get("Assignee", {}).get("rich_text", [])
+                        assignee = assignee_data[0].get("plain_text", "Unassigned") if assignee_data else "Unassigned"
+                        priority = props.get("Priority", {}).get("select", {}).get("name", "Unknown")
+                        
+                        overdue_tasks.append({
+                            "title": title,
+                            "assignee": assignee,
+                            "priority": priority,
+                            "due_date": due_date,
+                            "days_overdue": days_overdue,
+                            "status": status,
+                            "url": t.get("url")
+                        })
+                except:
+                    pass
+        
+        # Sort by days overdue (most overdue first)
+        overdue_tasks.sort(key=lambda x: x["days_overdue"], reverse=True)
+        
+        return {
+            "total_overdue": len(overdue_tasks),
+            "tasks": overdue_tasks
+        }
+    
+    except Exception as e:
+        print(f"[ERROR] Overdue tasks error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching overdue tasks: {str(e)}")
+
+
+@app.get("/tasks/at-risk")
+async def get_at_risk_tasks():
+    """Get tasks at risk of missing deadlines (due within 2 days)"""
+    
+    if not notion_integration:
+        raise HTTPException(status_code=500, detail="Notion not available")
+    
+    try:
+        url = f"https://api.notion.com/v1/databases/{notion_integration.database_id}/query"
+        response = requests.post(url, headers=notion_integration.headers, json={})
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=500, detail="Failed to query Notion")
+        
+        data = response.json()
+        tasks = data.get("results", [])
+        
+        from datetime import datetime, date, timedelta
+        today = date.today()
+        risk_threshold = today + timedelta(days=2)  # Next 2 days
+        
+        at_risk_tasks = []
+        
+        for t in tasks:
+            props = t.get("properties", {})
+            status = props.get("Status", {}).get("select", {}).get("name", "Unknown")
+            
+            # Only look at non-completed tasks
+            if status == "Done":
+                continue
+            
+            due_date_obj = props.get("Due Date", {}).get("date")
+            due_date = due_date_obj.get("start") if due_date_obj else None
+            
+            if due_date:
+                try:
+                    due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                    
+                    # Task is due soon (within 2 days) and not done
+                    if today <= due <= risk_threshold:
+                        days_until_due = (due - today).days
+                        
+                        title = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "Untitled")
+                        assignee_data = props.get("Assignee", {}).get("rich_text", [])
+                        assignee = assignee_data[0].get("plain_text", "Unassigned") if assignee_data else "Unassigned"
+                        priority = props.get("Priority", {}).get("select", {}).get("name", "Unknown")
+                        
+                        at_risk_tasks.append({
+                            "title": title,
+                            "assignee": assignee,
+                            "priority": priority,
+                            "due_date": due_date,
+                            "days_until_due": days_until_due,
+                            "status": status,
+                            "url": t.get("url")
+                        })
+                except:
+                    pass
+        
+        # Sort by urgency (soonest first)
+        at_risk_tasks.sort(key=lambda x: x["days_until_due"])
+        
+        return {
+            "total_at_risk": len(at_risk_tasks),
+            "tasks": at_risk_tasks
+        }
+    
+    except Exception as e:
+        print(f"[ERROR] At-risk tasks error: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching at-risk tasks: {str(e)}")
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
