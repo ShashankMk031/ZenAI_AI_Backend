@@ -626,6 +626,86 @@ async def get_at_risk_tasks():
     except Exception as e:
         print(f"[ERROR] At-risk tasks error: {e}")
         raise HTTPException(status_code=500, detail=f"Error fetching at-risk tasks: {str(e)}")
+    
+@app.get("/reports/daily") 
+async def generate_daily_report(): 
+    """
+        Generate daily progress report 
+    """ 
+    if not notion_integration: 
+        raise HTTPException(status_code=500, detail="Notion not available") 
+    try : 
+        # Get dashboard data 
+        dashboard = await get_dashboard() 
+        overdue = await get_overdue_tasks()  
+        at_risk = await get_at_risk_tasks() 
+        
+        from datetime import datetime 
+        today = datetime.now().strftime("%A, %B %d, %Y") 
+        
+        # Build report 
+        report_lines = [
+            f"# Daily Project Report - {today}",
+            "",
+            "## Summary",
+            f"- **Total Tasks**: {dashboard['summary']['total_tasks']}",
+            f"- **Completed**: {dashboard['summary']['completed']} ({dashboard['summary']['completion_rate']})",
+            f"- **In Progress**: {dashboard['summary']['in_progress']}",
+            f"- **To Do**: {dashboard['summary']['todo']}",
+            f"- **Overdue**: {dashboard['summary']['overdue']}",
+            f"- **At Risk**: {len(at_risk['tasks'])}",
+            "",
+            f"## Overdue Tasks ({overdue['total_overdue']})",
+            ""
+        ] 
+        
+        if overdue['tasks']:
+            for task in overdue['tasks']:
+                report_lines.append(f"- **{task['title']}** ({task['assignee']}) - {task['days_overdue']} days overdue")
+        else:
+            report_lines.append("- No overdue tasks!")
+        
+        report_lines.extend([
+            "",
+            f"## At-Risk Tasks ({at_risk['total_at_risk']})",
+            ""
+        ]) 
+          
+        if at_risk['tasks']:
+            for task in at_risk['tasks']:
+                report_lines.append(f"- **{task['title']}** ({task['assignee']}) - due in {task['days_until_due']} days")
+        else:
+            report_lines.append("- No at-risk tasks")
+        
+        report_lines.extend([
+            "",
+            "## Team Workload",
+            ""
+        ])
+        # gropus by assignee 
+        assignee_counts = {}
+        for task in dashboard['tasks']:
+            assignee = task['assignee']
+            if task['status'] != "Done":
+                assignee_counts[assignee] = assignee_counts.get(assignee, 0) + 1
+        
+        for assignee, count in sorted(assignee_counts.items(), key=lambda x: x[1], reverse=True):
+            report_lines.append(f"- **{assignee}**: {count} active tasks")
+        
+        # Join all lines
+        report = "\n".join(report_lines)
+        
+        return { 
+                "reported_date" : today, 
+                "markdown" : report, 
+                "summary" : dashboard['summary'], 
+                "overdue_count" : overdue['total_overdue'], 
+                "at_risk_count" : at_risk['total_at_risk']
+            } 
+    except Exception as e : 
+        raise HTTPException(status_code = 500, details = f"Report generation failed: {str(e)}")
+    
+          
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
