@@ -119,9 +119,9 @@ ZenAI - an AI-powered project management automation system that listens to meeti
 - GroqLLM for NLP 
 - Langchain framerwork for agent orchestration 
 - Smart model selection -automatically detects available models and choose best one 
-- Prefered models : 
+- Prefered models : (OpenAI LLM will be used as primary later )
     1. llama-3.3-70b-versatile (primary) 
-    2. llama-3.1-8b-instant (fast fallback) 
+    2. llama-3.1-8b-instant  
     3. meta-llama/llama-4-scout-17b-16e-instruct 
     4. gemma2-9b-it 
     5. qwen/qwen3-32b
@@ -138,19 +138,11 @@ ZenAI - an AI-powered project management automation system that listens to meeti
 - Markdown code block cleanup (handles ```json formatting)
 - JSON parsing with error recovery
 - Input validation via Pydantic models 
+
 **Data Models:** 
-- TaskItem: title, description, assignee (optional), priority, due_date (optional)
+- TaskItem: title, description, assignee (optional), priority (default - medium ) , due_date (optional)
 - MeetingAnalysis: key_decisions, action_items, risks_and_blockers, meeting_summary 
-**Core dependencies:** 
-- fastapi==0.104.1
-- uvicorn==0.24.0
-- langchain==0.1.20
-- langchain-groq==0.1.3
-- groq==0.9.0 (for model detection)
-- pydantic==2.8.0
-- python-dotenv==1.0.0
-- requests==2.31.0
-- httpx==0.27.0 
+
 
 ### **Architecture Overview** 
 Input Layer: Text transcripts (POST /analyze-meeting) OR Audio files (POST /analyze-meeting-audio)
