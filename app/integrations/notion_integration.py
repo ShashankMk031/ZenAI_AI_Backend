@@ -196,3 +196,80 @@ class NotionIntegration:
             results.append(result)
         
         return results
+    
+    def get_assignee_email_from_task(self, task_properties: dict) -> tuple: 
+        """ 
+        Extract the assignee name and email from Notion props 
+        Returns : (assignee_name, assignee_email) """ 
+        
+        assignee_prop = task_properties.get("Assignee" , {} ) 
+        
+        # Check if it's a person property 
+        if assignee_prop.get("type") == 'people': 
+            people = assignee_prop.get("people", []) 
+            if people: 
+                person = people[0] # get the first person 
+                name = person.get("name" , "Unassigne") 
+                email = person.get("person", {}).get("email") 
+                return (name, email) 
+        
+        # Fall back: 
+        elif assignee_prop.get("type") == "rich_text": 
+            rich_text = assignee_prop.get("rich_text" , [] ) 
+            if rich_text: 
+                name = rich_text[0].get("plain_text", "Unassigned") 
+                return (name, None) 
+        return ("Unassigned", None) 
+    
+    def query_all_tasks_with_emails(self) -> list: 
+        # Query all tasks and extract assignee email 
+        
+        try: 
+            url = f"https://api.notion.com/v1/databases/{self.database_id}/query"
+            response = requests.post(url , headers= self.headers , json = {} ) 
+            
+            if response.status_code != 200: 
+                print(f"[ERROR] Failed to query the database: {response.text}") 
+                return [] 
+
+            data = response.json() 
+            tasks = data.get("results", []) 
+            
+            # Extract the tdetails with emails 
+            task_list = [] 
+            for task in tasks : 
+                props = task.get("properties", {}) 
+                
+                # Get basic info 
+                title_prop = props.get("Name" , {}).get("title", [{}]) 
+                title = title_prop[0].get("plain_text", "Untitled") if title_prop else "Untitled" 
+                
+                status_prop = props.get("Status", {}).get('select', {}) 
+                status = status_prop.get("name", "Unknown") 
+                
+                priority_prop = props.get("Status", {}).get("select", {}) 
+                priority = priority_prop.get("name", "Unknown") 
+                
+                due_date_obj = props.get("Due Date", {}).get("date") 
+                due_date = due_date_obj.get("start") if due_date_obj else None 
+                
+                # Get the assignee with email 
+                assignee_name, assignee_email = self.get_assignee_email_from_task(props) 
+                
+                task_list.append({
+                    "id" : task.get("id"),
+                    "title" : title, 
+                    "status" : status, 
+                    "priority" : priority, 
+                    "assignee_name" : assignee_name, 
+                    "assignee_email" : assignee_email, 
+                    "due_date" : due_date, 
+                    "url": task.get("url") 
+                })
+                
+            return task_list 
+        
+        except Exception as e: 
+            print(f"[ERROR] Failed to query tasks: {e}") 
+            return [] 
+        
