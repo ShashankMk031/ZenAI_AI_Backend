@@ -11,6 +11,8 @@ import json
 import tempfile
 from app.integrations.notion_integration import NotionIntegration
 from datetime import datetime
+from app.services.email_service import EmailService 
+from typing import List, Optional 
 
 app = FastAPI(title="AI Project Manager Agent", version="1.0.0")
 
@@ -99,13 +101,22 @@ except Exception as e:
     print(f"[ERROR] Notion integration initialization failed: {e}")
     notion_integration = None
 
+# Initialize Email Service 
+try: 
+    email_service = EmailService()  
+    print("[INFO] Email service initialized") 
+except Exception as e: 
+    print(f"[ERROR] Email service initialization failed: {e}") 
+    email_service = None 
+
 @app.get("/")
 async def root():
     return {
         "message": "AI Project Manager Agent is running!", 
         "groq_status": "connected" if llm else "failed",
         "audio_status": "enabled" if audio_processor else "disabled",
-        "notion_status": "connected" if notion_integration else "disabled"
+        "notion_status": "connected" if notion_integration else "disabled",
+        "email_status" : "enabled" if email_service else "disabled"
     } 
 @app.get("/test-notion") 
 async def test_notion():
@@ -402,70 +413,34 @@ async def get_dashboard():
         raise HTTPException(status_code=500, detail="Notion not available")
     
     try:
-        # Query all tasks from Notion
-        url = f"https://api.notion.com/v1/databases/{notion_integration.database_id}/query"
-        response = requests.post(url, headers=notion_integration.headers, json={})
-        
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to query Notion")
-        
-        data = response.json()
-        tasks = data.get("results", [])
+        # Query all tasks with emails
+        tasks = notion_integration.query_all_tasks_with_emails()
         
         # Calculate metrics
         total_tasks = len(tasks)
-        completed = sum(1 for t in tasks if t.get("properties", {}).get("Status", {}).get("select", {}).get("name") == "Done")
-        in_progress = sum(1 for t in tasks if t.get("properties", {}).get("Status", {}).get("select", {}).get("name") == "In Progress")
-        todo = sum(1 for t in tasks if t.get("properties", {}).get("Status", {}).get("select", {}).get("name") == "To Do")
+        completed = sum(1 for t in tasks if t['status'] == "Done")
+        in_progress = sum(1 for t in tasks if t['status'] == "In Progress")
+        todo = sum(1 for t in tasks if t['status'] == "To Do")
         
         # Get today's date for overdue calculation
         from datetime import datetime, date
         today = date.today()
         
-        # Extract task details
-        task_list = []
         overdue_count = 0
         
-        for t in tasks:
-            props = t.get("properties", {})
-            
-            # Get task name
-            title = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "Untitled")
-            
-            # Get status
-            status = props.get("Status", {}).get("select", {}).get("name", "Unknown")
-            
-            # Get priority
-            priority = props.get("Priority", {}).get("select", {}).get("name", "Unknown")
-            
-            # Get assignee
-            assignee_data = props.get("Assignee", {}).get("rich_text", [])
-            assignee = assignee_data[0].get("plain_text", "Unassigned") if assignee_data else "Unassigned"
-            
-            # Get due date
-            due_date_obj = props.get("Due Date", {}).get("date")
-            due_date = due_date_obj.get("start") if due_date_obj else None
-            
-            # Check if overdue
-            is_overdue = False
-            if due_date and status != "Done":
+        for task in tasks:
+            if task['due_date'] and task['status'] != "Done":
                 try:
-                    due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                    due = datetime.strptime(task['due_date'], "%Y-%m-%d").date()
                     if due < today:
-                        is_overdue = True
+                        task['is_overdue'] = True
                         overdue_count += 1
+                    else:
+                        task['is_overdue'] = False
                 except:
-                    pass
-            
-            task_list.append({
-                "title": title,
-                "status": status,
-                "priority": priority,
-                "assignee": assignee,
-                "due_date": due_date,
-                "is_overdue": is_overdue,
-                "url": t.get("url")
-            })
+                    task['is_overdue'] = False
+            else:
+                task['is_overdue'] = False
         
         return {
             "summary": {
@@ -476,75 +451,51 @@ async def get_dashboard():
                 "overdue": overdue_count,
                 "completion_rate": f"{(completed/total_tasks*100):.1f}%" if total_tasks > 0 else "0%"
             },
-            "tasks": task_list
+            "tasks": tasks
         }
     
     except Exception as e:
         print(f"[ERROR] Dashboard error: {e}")
         raise HTTPException(status_code=500, detail=f"Dashboard error: {str(e)}")
 
-
 @app.get("/tasks/overdue")
 async def get_overdue_tasks():
-    """Get list of overdue tasks"""
+    """Get list of overdue tasks with assignee emails"""
     
     if not notion_integration:
         raise HTTPException(status_code=500, detail="Notion not available")
     
     try:
-        # Query all tasks
-        url = f"https://api.notion.com/v1/databases/{notion_integration.database_id}/query"
-        response = requests.post(url, headers=notion_integration.headers, json={})
-        
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to query Notion")
-        
-        data = response.json()
-        tasks = data.get("results", [])
+        tasks = notion_integration.query_all_tasks_with_emails()
         
         from datetime import datetime, date
         today = date.today()
         
         overdue_tasks = []
         
-        for t in tasks:
-            props = t.get("properties", {})
-            status = props.get("Status", {}).get("select", {}).get("name", "Unknown")
-            
-            # Skip completed tasks
-            if status == "Done":
+        for task in tasks:
+            if task['status'] == "Done":
                 continue
             
-            # Get due date
-            due_date_obj = props.get("Due Date", {}).get("date")
-            due_date = due_date_obj.get("start") if due_date_obj else None
-            
-            if due_date:
+            if task['due_date']:
                 try:
-                    due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                    due = datetime.strptime(task['due_date'], "%Y-%m-%d").date()
                     if due < today:
-                        # Task is overdue
                         days_overdue = (today - due).days
-                        
-                        title = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "Untitled")
-                        assignee_data = props.get("Assignee", {}).get("rich_text", [])
-                        assignee = assignee_data[0].get("plain_text", "Unassigned") if assignee_data else "Unassigned"
-                        priority = props.get("Priority", {}).get("select", {}).get("name", "Unknown")
-                        
                         overdue_tasks.append({
-                            "title": title,
-                            "assignee": assignee,
-                            "priority": priority,
-                            "due_date": due_date,
+                            "title": task['title'],
+                            "assignee": task['assignee_name'],
+                            "assignee_email": task['assignee_email'],
+                            "priority": task['priority'],
+                            "due_date": task['due_date'],
                             "days_overdue": days_overdue,
-                            "status": status,
-                            "url": t.get("url")
+                            "status": task['status'],
+                            "url": task['url']
                         })
                 except:
                     pass
         
-        # Sort by days overdue (most overdue first)
-        overdue_tasks.sort(key=lambda x: x["days_overdue"], reverse=True)
+        overdue_tasks.sort(key=lambda x: x['days_overdue'], reverse=True)
         
         return {
             "total_overdue": len(overdue_tasks),
@@ -553,70 +504,48 @@ async def get_overdue_tasks():
     
     except Exception as e:
         print(f"[ERROR] Overdue tasks error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fetching overdue tasks: {str(e)}")
-
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 @app.get("/tasks/at-risk")
 async def get_at_risk_tasks():
-    """Get tasks at risk of missing deadlines (due within 2 days)"""
+    """Get tasks at risk with assignee emails"""
     
     if not notion_integration:
         raise HTTPException(status_code=500, detail="Notion not available")
     
     try:
-        url = f"https://api.notion.com/v1/databases/{notion_integration.database_id}/query"
-        response = requests.post(url, headers=notion_integration.headers, json={})
-        
-        if response.status_code != 200:
-            raise HTTPException(status_code=500, detail="Failed to query Notion")
-        
-        data = response.json()
-        tasks = data.get("results", [])
+        tasks = notion_integration.query_all_tasks_with_emails()
         
         from datetime import datetime, date, timedelta
         today = date.today()
-        risk_threshold = today + timedelta(days=2)  # Next 2 days
+        risk_threshold = today + timedelta(days=2)
         
         at_risk_tasks = []
         
-        for t in tasks:
-            props = t.get("properties", {})
-            status = props.get("Status", {}).get("select", {}).get("name", "Unknown")
-            
-            # Only look at non-completed tasks
-            if status == "Done":
+        for task in tasks:
+            if task['status'] == "Done":
                 continue
             
-            due_date_obj = props.get("Due Date", {}).get("date")
-            due_date = due_date_obj.get("start") if due_date_obj else None
-            
-            if due_date:
+            if task['due_date']:
                 try:
-                    due = datetime.strptime(due_date, "%Y-%m-%d").date()
+                    due = datetime.strptime(task['due_date'], "%Y-%m-%d").date()
                     
-                    # Task is due soon (within 2 days) and not done
                     if today <= due <= risk_threshold:
                         days_until_due = (due - today).days
-                        
-                        title = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "Untitled")
-                        assignee_data = props.get("Assignee", {}).get("rich_text", [])
-                        assignee = assignee_data[0].get("plain_text", "Unassigned") if assignee_data else "Unassigned"
-                        priority = props.get("Priority", {}).get("select", {}).get("name", "Unknown")
-                        
                         at_risk_tasks.append({
-                            "title": title,
-                            "assignee": assignee,
-                            "priority": priority,
-                            "due_date": due_date,
+                            "title": task['title'],
+                            "assignee": task['assignee_name'],
+                            "assignee_email": task['assignee_email'],
+                            "priority": task['priority'],
+                            "due_date": task['due_date'],
                             "days_until_due": days_until_due,
-                            "status": status,
-                            "url": t.get("url")
+                            "status": task['status'],
+                            "url": task['url']
                         })
                 except:
                     pass
         
-        # Sort by urgency (soonest first)
-        at_risk_tasks.sort(key=lambda x: x["days_until_due"])
+        at_risk_tasks.sort(key=lambda x: x['days_until_due'])
         
         return {
             "total_at_risk": len(at_risk_tasks),
@@ -625,8 +554,7 @@ async def get_at_risk_tasks():
     
     except Exception as e:
         print(f"[ERROR] At-risk tasks error: {e}")
-        raise HTTPException(status_code=500, detail=f"Error fetching at-risk tasks: {str(e)}")
-    
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 @app.get("/reports/daily") 
 async def generate_daily_report(): 
     """
@@ -704,8 +632,171 @@ async def generate_daily_report():
             } 
     except Exception as e : 
         raise HTTPException(status_code = 500, details = f"Report generation failed: {str(e)}")
+@app.post("/notifications/send-daily-report")
+async def send_daily_report_email(email: Optional[str] = None):
+    """
+    Send daily report via email
+    - If email is provided: send to that specific email
+    - If no email: send to all team members who have tasks
+    """
     
-          
+    if not email_service:
+        raise HTTPException(status_code=500, detail="Email service not configured")
+    
+    try:
+        # Generate report
+        report_data = await generate_daily_report()
+        
+        results = []
+        
+        if email:
+            # Send to specific email
+            success = email_service.send_daily_report(
+                report_markdown=report_data['markdown'],
+                to_email=email
+            )
+            results.append({
+                "email": email,
+                "sent": success
+            })
+        else:
+            # Send to all team members from Notion
+            dashboard = await get_dashboard()
+            
+            # Collect unique assignee emails
+            unique_emails = set()
+            for task in dashboard['tasks']:
+                if task.get('assignee_email'):
+                    unique_emails.add((task['assignee_name'], task['assignee_email']))
+            
+            # Also send to notification email (you)
+            notification_email = os.getenv("NOTIFICATION_EMAIL")
+            if notification_email:
+                unique_emails.add(("Team Lead", notification_email))
+            
+            # Send to each unique person
+            for assignee_name, assignee_email in unique_emails:
+                success = email_service.send_daily_report(
+                    report_markdown=report_data['markdown'],
+                    to_email=assignee_email
+                )
+                results.append({
+                    "assignee": assignee_name,
+                    "email": assignee_email,
+                    "sent": success
+                })
+        
+        return {
+            "total_sent": len(results),
+            "successful": sum(1 for r in results if r.get('sent')),
+            "failed": sum(1 for r in results if not r.get('sent')),
+            "results": results
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+@app.post("/notifications/send-overdue-alerts")
+async def send_overdue_alerts_email():
+    """Send overdue task alerts to individual assignees using their Notion emails"""
+    
+    if not email_service:
+        raise HTTPException(status_code=500, detail="Email service not configured")
+    
+    try:
+        overdue = await get_overdue_tasks()
+        
+        results = []
+        fallback_email = os.getenv("NOTIFICATION_EMAIL")
+        
+        for task in overdue['tasks']:
+            # Use assignee's email from Notion, fallback to notification email
+            target_email = task.get('assignee_email') or fallback_email
+            
+            if target_email:
+                success = email_service.send_overdue_alert(
+                    task_title=task['title'],
+                    assignee=task['assignee'],
+                    days_overdue=task['days_overdue'],
+                    task_url=task['url'],
+                    to_email=target_email
+                )
+                results.append({
+                    "task": task['title'],
+                    "assignee": task['assignee'],
+                    "email": target_email,
+                    "email_source": "notion" if task.get('assignee_email') else "fallback",
+                    "sent": success
+                })
+            else:
+                results.append({
+                    "task": task['title'],
+                    "assignee": task['assignee'],
+                    "email": None,
+                    "sent": False,
+                    "error": "No email available"
+                })
+        
+        return {
+            "total_alerts": len(results),
+            "successful": sum(1 for r in results if r.get('sent')),
+            "failed": sum(1 for r in results if not r.get('sent')),
+            "results": results
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@app.post("/notifications/send-at-risk-reminders")
+async def send_at_risk_reminders_email():
+    """Send deadline reminders using Notion emails"""
+    
+    if not email_service:
+        raise HTTPException(status_code=500, detail="Email service not configured")
+    
+    try:
+        at_risk = await get_at_risk_tasks()
+        
+        results = []
+        fallback_email = os.getenv("NOTIFICATION_EMAIL")
+        
+        for task in at_risk['tasks']:
+            target_email = task.get('assignee_email') or fallback_email
+            
+            if target_email:
+                success = email_service.send_deadline_reminder(
+                    task_title=task['title'],
+                    assignee=task['assignee'],
+                    days_until_due=task['days_until_due'],
+                    task_url=task['url'],
+                    to_email=target_email
+                )
+                results.append({
+                    "task": task['title'],
+                    "assignee": task['assignee'],
+                    "email": target_email,
+                    "email_source": "notion" if task.get('assignee_email') else "fallback",
+                    "sent": success
+                })
+            else:
+                results.append({
+                    "task": task['title'],
+                    "assignee": task['assignee'],
+                    "email": None,
+                    "sent": False,
+                    "error": "No email available"
+                })
+        
+        return {
+            "total_reminders": len(results),
+            "successful": sum(1 for r in results if r.get('sent')),
+            "failed": sum(1 for r in results if not r.get('sent')),
+            "results": results
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8080)
