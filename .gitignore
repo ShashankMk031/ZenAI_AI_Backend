@@ -1,4 +1,54 @@
-venv/
-.env
+# Python & virtualenv
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+*.egg
+*.log
+*.pot
 *.pyc
+*.so
+
+# FastAPI cache and build
+.idea/
+.vscode/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+coverage/
+dist/
+build/
+
+# Environment files
+.env
+.env.*
+
+# System
+.DS_Store
+Thumbs.db
+
+# Local SQLite DBs or temp data
+*.sqlite3
+*.db
+
+# Node (frontend)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# OS-specific
+*.bak
+*.swp
+*.swo
+*.tmp
+
+# PyCharm / VSCode settings
+.vscode/
+.idea/
